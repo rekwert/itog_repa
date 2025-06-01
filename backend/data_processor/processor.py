@@ -1,174 +1,130 @@
 # backend/data_processor/processor.py
 import redis.asyncio as redis
-import redis.exceptions # Явно импортируем модуль исключений
-import asyncio
 import json
+import ccxtpro
 from typing import Dict, Any, Optional
 
 from backend.core.config import settings
-from backend.utils.logger import logger # Убедитесь, что здесь импортируется настроенный логгер
+from backend.utils.logger import logger
 
 class DataProcessor:
-    """
-    Обрабатывает данные с бирж и кэширует их в Redis.
-    Также предоставляет методы для получения данных из кэша.
-    """
     def __init__(self):
         self._redis_client: Optional[redis.Redis] = None
-        self.is_connected: bool = False # Флаг статуса подключения
+        self._exchange_instances: Dict[str, Any] = {}
 
     async def connect_redis(self):
-        logger.info("Попытка подключения к Redis...")
-        logger.debug(
-            f"Конфигурация Redis: host={settings.REDIS_HOST}, port={settings.REDIS_PORT}, db={settings.REDIS_DB}")
-
-        if self.is_connected and self._redis_client is not None:
-            try:
-                logger.debug(
-                    f"Проверка существующего клиента ping: тип клиента={type(self._redis_client)}, тип метода ping={type(self._redis_client.ping)}")
-                if self._redis_client.ping():  # Без await
-                    logger.info("Существующий клиент Redis подключен и доступен.")
-                    self.is_connected = True
-                    return
-                else:
-                    logger.warning("Пинг существующего клиента Redis вернул False. Пытаемся создать новое соединение.")
-                    self._redis_client = None
-                    self.is_connected = False
-            except Exception as e:
-                logger.warning(
-                    f"Пинг существующего клиента Redis завершился ошибкой: {e} (Тип: {type(e).__name__}). Пытаемся создать новое соединение.")
-                self._redis_client = None
-                self.is_connected = False
-
+        """Подключается к Redis."""
         try:
-            logger.info(
-                f"Попытка создать новое соединение с Redis на {settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}")
-            self._redis_client = redis.from_url(
-                f"redis://{settings.REDIS_HOST}:{settings.REDIS_PORT}/{settings.REDIS_DB}",
-                encoding="utf-8",
-                decode_responses=True,
-                socket_connect_timeout=5,
-                socket_timeout=5,
-            )
-
-            logger.debug(
-                f"Начальный пинг нового клиента: тип клиента={type(self._redis_client)}, тип метода ping={type(self._redis_client.ping)}")
-            if self._redis_client.ping():  # Без await
-                logger.info("Успешно подключен и пингован клиент Redis.")
-                self.is_connected = True
-            else:
-                logger.error("Пинг Redis для нового соединения не удался.")
-                self._redis_client = None
-                self.is_connected = False
-
-        except redis.exceptions.ConnectionError as e:
-            logger.error(f"Не удалось подключиться к Redis (ConnectionError): {e}")
-            self._redis_client = None
-            self.is_connected = False
+            if self._redis_client is None:
+                self._redis_client = redis.Redis(
+                    host=settings.REDIS_HOST,
+                    port=settings.REDIS_PORT,
+                    db=settings.REDIS_DB,
+                    decode_responses=True
+                )
+                await self._redis_client.ping()
+                logger.info("Успешно подключено к Redis")
         except Exception as e:
-            logger.error(f"Неожиданная ошибка при подключении к Redis: {e} (Тип: {type(e).__name__})")
+            logger.error(f"Ошибка подключения к Redis: {e}", exc_info=True)
             self._redis_client = None
-            self.is_connected = False
-
-        if not self.is_connected:
-            logger.error("Клиент Redis НЕ подключен после попытки.")
-
+            raise
 
     async def disconnect_redis(self):
-        """Закрывает соединение с Redis."""
-        logger.info("Закрытие соединения с Redis...")
-        if self._redis_client:
-            try:
-                logger.debug("Closing Redis client connection...")
-                # Попытка асинхронного закрытия клиента
-                await self._redis_client.close()
-                # Попытка отключить пул соединений
-                try:
-                    if hasattr(self._redis_client, 'connection_pool') and self._redis_client.connection_pool:
-                       await self._redis_client.connection_pool.disconnect()
-                       logger.debug("Redis connection pool disconnected.")
-                except Exception as pool_e:
-                     logger.warning(f"Error during Redis connection pool disconnect: {pool_e} (Type: {type(pool_e).__name__})")
-
-                logger.info("Соединение с Redis закрыто успешно.")
-            except Exception as e:
-                 logger.error(f"Ошибка при закрытии соединения с Redis: {e} (Type: {type(e).__name__})")
+        """Отключается от Redis."""
+        try:
+            if self._redis_client is not None:
+                await self._redis_client.aclose()
+                logger.info("Отключено от Redis")
+        except Exception as e:
+            logger.error(f"Ошибка отключения от Redis: {e}", exc_info=True)
+        finally:
             self._redis_client = None
-            self.is_connected = False
-        else:
-            logger.info("Redis client was not connected, nothing to close.")
 
+    async def cache_orderbook(self, exchange_id: str, symbol: str, orderbook_data: Dict[str, Any]):
+        """Кэширует данные стакана в Redis."""
+        if self._redis_client is None:
+            logger.error("Redis клиент не инициализирован")
+            return False
+        key = f"orderbook:{exchange_id}:{symbol}"
+        try:
+            serialized_data = json.dumps(orderbook_data)
+            await self._redis_client.set(key, serialized_data, ex=60)  # Храним 60 секунд
+            logger.debug(f"Успешно кэширован стакан для {exchange_id}:{symbol}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка кэширования стакана для {exchange_id}:{symbol} в Redis: {e}", exc_info=True)
+            return False
 
-    # --- Методы для кэширования данных ---
-    # В этих методах проверяем self.is_connected перед выполнением операций
+    async def get_orderbook(self, exchange_id: str, symbol: str) -> Optional[Dict[str, Any]]:
+        """Получает данные стакана из Redis."""
+        if self._redis_client is None:
+            logger.error("Redis клиент не инициализирован")
+            return None
+        key = f"orderbook:{exchange_id}:{symbol}"
+        try:
+            serialized_data = await self._redis_client.get(key)
+            if serialized_data:
+                orderbook = json.loads(serialized_data)
+                logger.debug(f"Получен стакан для {exchange_id}:{symbol} из Redis")
+                return orderbook
+            logger.debug(f"Стакан для {exchange_id}:{symbol} не найден в Redis")
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка получения стакана для {exchange_id}:{symbol} из Redis: {e}", exc_info=True)
+            return None
 
     async def cache_ticker(self, exchange_id: str, symbol: str, ticker_data: Dict[str, Any]):
         """Кэширует данные тикера в Redis."""
-        if not self.is_connected: # Проверяем флаг подключения
-            # logger.debug("Redis client not available, cannot cache ticker.")
-            return
-
-        key = f"ticker:{exchange_id.lower()}:{symbol.upper()}"
+        if self._redis_client is None:
+            logger.error("Redis клиент не инициализирован")
+            return False
+        key = f"ticker:{exchange_id}:{symbol}"
         try:
-            await self._redis_client.set(key, json.dumps(ticker_data))
-            # logger.debug(f"Кэширован тикер для {exchange_id}:{symbol}")
+            serialized_data = json.dumps(ticker_data)
+            await self._redis_client.set(key, serialized_data, ex=60)
+            logger.debug(f"Успешно кэширован тикер для {exchange_id}:{symbol}")
+            return True
         except Exception as e:
-            logger.error(f"Ошибка кэширования тикера для {exchange_id}:{symbol} в Redis: {e} (Type: {type(e).__name__})")
-
-
-    async def cache_orderbook(self, exchange_id: str, symbol: str, orderbook_data: Dict[str, Any]):
-        """Кэширует данные стакана (лучшие Bid/Ask уровни) в Redis."""
-        if not self.is_connected: # Проверяем флаг подключения
-            # logger.debug("Redis client not available, cannot cache orderbook.")
-            return
-
-        key = f"orderbook:{exchange_id.lower()}:{symbol.upper()}"
-        try:
-            cached_data = {
-                'bid': orderbook_data.get('bid'),
-                'ask': orderbook_data.get('ask'),
-                'bidVolume': orderbook_data.get('bidVolume'),
-                'askVolume': orderbook_data.get('askVolume'),
-                'timestamp': orderbook_data.get('timestamp')
-            }
-            await self._redis_client.set(key, json.dumps(cached_data))
-            # logger.debug(f"Кэширован стакан для {exchange_id}:{symbol}")
-        except Exception as e:
-             logger.error(f"Ошибка кэширования стакана для {exchange_id}:{symbol} в Redis: {e} (Type: {type(e).__name__})")
-
-    # --- Методы для получения данных ---
+            logger.error(f"Ошибка кэширования тикера для {exchange_id}:{symbol} в Redis: {e}", exc_info=True)
+            return False
 
     async def get_ticker(self, exchange_id: str, symbol: str) -> Optional[Dict[str, Any]]:
         """Получает данные тикера из Redis."""
-        if not self.is_connected: # Проверяем флаг подключения
-            # logger.debug("Redis client not available, cannot get ticker.")
+        if self._redis_client is None:
+            logger.error("Redis клиент не инициализирован")
             return None
-
-        key = f"ticker:{exchange_id.lower()}:{symbol.upper()}"
+        key = f"ticker:{exchange_id}:{symbol}"
         try:
-            data = await self._redis_client.get(key)
-            if data:
-                return json.loads(data) if isinstance(data, str) else data
+            serialized_data = await self._redis_client.get(key)
+            if serialized_data:
+                ticker = json.loads(serialized_data)
+                logger.debug(f"Получен тикер для {exchange_id}:{symbol} из Redis")
+                return ticker
+            logger.debug(f"Тикер для {exchange_id}:{symbol} не найден в Redis")
             return None
         except Exception as e:
-            logger.error(f"Ошибка получения тикера для {exchange_id}:{symbol} из Redis: {e} (Type: {type(e).__name__})")
+            logger.error(f"Ошибка получения тикера для {exchange_id}:{symbol} из Redis: {e}", exc_info=True)
             return None
 
-    async def get_orderbook(self, exchange_id: str, symbol: str) -> Optional[Dict[str, Any]]:
-        """Получает данные стакана (лучшие Bid/Ask) из Redis."""
-        if not self.is_connected: # Проверяем флаг подключения
-            # logger.debug("Redis client not available, cannot get orderbook.")
-            return None
+    def get_exchange(self, exchange_id: str) -> Optional[Any]:
+        """Возвращает экземпляр биржи."""
+        if exchange_id not in self._exchange_instances:
+            try:
+                exchange_class = getattr(ccxtpro, exchange_id, None)
+                if exchange_class is None:
+                    logger.error(f"Биржа {exchange_id} не поддерживается ccxtpro")
+                    return None
+                api_key = getattr(settings, f"{exchange_id.upper()}_API_KEY", None)
+                api_secret = getattr(settings, f"{exchange_id.upper()}_API_SECRET", None)
+                self._exchange_instances[exchange_id] = exchange_class({
+                    'apiKey': api_key,
+                    'secret': api_secret,
+                    'enableRateLimit': True,
+                })
+                logger.info(f"Создан экземпляр биржи {exchange_id}")
+            except Exception as e:
+                logger.error(f"Ошибка создания экземпляра биржи {exchange_id}: {e}", exc_info=True)
+                return None
+        return self._exchange_instances.get(exchange_id)
 
-        key = f"orderbook:{exchange_id.lower()}:{symbol.upper()}"
-        try:
-            data = await self._redis_client.get(key)
-            if data:
-                 return json.loads(data) if isinstance(data, str) else data
-            return None
-        except Exception as e:
-            logger.error(f"Ошибка получения стакана для {exchange_id}:{symbol} из Redis: {e} (Type: {type(e).__name__})")
-            return None
-
-# Инициализируем экземпляр процессора (синглтон)
 data_processor = DataProcessor()

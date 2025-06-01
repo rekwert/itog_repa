@@ -1,7 +1,7 @@
 # backend/api/v1/endpoints.py
 from typing import List, Tuple, Optional
 from fastapi import APIRouter, HTTPException, WebSocket
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
 from decimal import Decimal
 import asyncio
 import redis.asyncio as redis
@@ -22,20 +22,22 @@ class OpportunityCexCexResponse(BaseModel):
     profit_percent: Decimal
     volume_usd: Optional[Decimal] = None
 
-    model_config = ConfigDict(
-        json_encoders={Decimal: lambda v: str(v)},
-        from_attributes=False
-    )
+    @field_serializer('buy_price', 'sell_price', 'profit_percent', 'volume_usd', when_used='json')
+    def serialize_decimal(self, value: Decimal) -> str:
+        return str(value) if value is not None else None
+
+    model_config = ConfigDict(from_attributes=False)
 
 class OpportunityCexCexCexResponse(BaseModel):
     cycle: List[Tuple[str, str, str]]
     profit_percent: Decimal
     volume_usd: Optional[Decimal] = None
 
-    model_config = ConfigDict(
-        json_encoders={Decimal: lambda v: str(v)},
-        from_attributes=False
-    )
+    @field_serializer('profit_percent', 'volume_usd', when_used='json')
+    def serialize_decimal(self, value: Decimal) -> str:
+        return str(value) if value is not None else None
+
+    model_config = ConfigDict(from_attributes=False)
 
 @router.get("/arbitrage/cex_cex", response_model=List[OpportunityCexCexResponse], tags=["Arbitrage"])
 async def get_cex_cex_opportunities():
@@ -97,7 +99,7 @@ async def websocket_cex_cex_opportunities(websocket: WebSocket):
         logger.error(f"Ошибка в WebSocket /ws/arbitrage/cex_cex: {e}", exc_info=True)
     finally:
         await pubsub.unsubscribe("arbitrage:cex_cex")
-        await redis_client.close()
+        await redis_client.aclose()
         await websocket.close()
 
 @router.websocket("/ws/arbitrage/cex_cex_cex")
@@ -120,5 +122,5 @@ async def websocket_cex_cex_cex_opportunities(websocket: WebSocket):
         logger.error(f"Ошибка в WebSocket /ws/arbitrage/cex_cex_cex: {e}", exc_info=True)
     finally:
         await pubsub.unsubscribe("arbitrage:cex_cex_cex")
-        await redis_client.close()
+        await redis_client.aclose()
         await websocket.close()
