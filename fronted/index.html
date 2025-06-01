@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crypto Arbitrage Scanner</title>
+    <script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.22.5/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white">
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        function App() {
+            const [cexCexOpportunities, setCexCexOpportunities] = useState([]);
+            const [cexCexCexOpportunities, setCexCexCexOpportunities] = useState([]);
+            const [filter, setFilter] = useState({ minProfit: 0, pair: '', exchange: '' });
+            const chartRef = useRef(null);
+            const chartInstance = useRef(null);
+
+            useEffect(() => {
+                const wsCex = new WebSocket('ws://localhost:8000/api/v1/ws/arbitrage/cex_cex');
+                wsCex.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    setCexCexOpportunities(data);
+                };
+                wsCex.onclose = () => console.log('WebSocket CEX-CEX disconnected');
+
+                const wsCexCexCex = new WebSocket('ws://localhost:8000/api/v1/ws/arbitrage/cex_cex_cex');
+                wsCexCexCex.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    setCexCexCexOpportunities(data);
+                };
+                wsCexCexCex.onclose = () => console.log('WebSocket CEX-CEX-CEX disconnected');
+
+                return () => {
+                    wsCex.close();
+                    wsCexCexCex.close();
+                };
+            }, []);
+
+            useEffect(() => {
+                if (chartRef.current) {
+                    if (chartInstance.current) {
+                        chartInstance.current.destroy();
+                    }
+                    chartInstance.current = new Chart(chartRef.current, {
+                        type: 'bar',
+                        data: {
+                            labels: cexCexOpportunities.map(opp => `${opp.pair} (${opp.buy_exchange} -> ${opp.sell_exchange})`),
+                            datasets: [{
+                                label: 'Profit %',
+                                data: cexCexOpportunities.map(opp => parseFloat(opp.profit_percent)),
+                                backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                                borderColor: 'rgba(75, 192, 192, 1)',
+                                borderWidth: 1
+                            }]
+                        },
+                        options: {
+                            scales: {
+                                y: { beginAtZero: true }
+                            }
+                        }
+                    });
+                }
+                return () => {
+                    if (chartInstance.current) {
+                        chartInstance.current.destroy();
+                    }
+                };
+            }, [cexCexOpportunities]);
+
+            const filteredCexCex = cexCexOpportunities.filter(opp =>
+                parseFloat(opp.profit_percent) >= filter.minProfit &&
+                (filter.pair === '' || opp.pair.toLowerCase().includes(filter.pair.toLowerCase())) &&
+                (filter.exchange === '' ||
+                 opp.buy_exchange.toLowerCase().includes(filter.exchange.toLowerCase()) ||
+                 opp.sell_exchange.toLowerCase().includes(filter.exchange.toLowerCase()))
+            );
+
+            return (
+                <div className="container mx-auto p-4">
+                    <h1 className="text-3xl font-bold mb-4">Crypto Arbitrage Scanner</h1>
+
+                    <div className="mb-4 flex space-x-4">
+                        <input
+                            type="number"
+                            placeholder="Min Profit %"
+                            className="p-2 bg-gray-800 rounded"
+                            onChange={(e) => setFilter({ ...filter, minProfit: parseFloat(e.target.value) || 0 })}
+                        />
+                        <input
+                            type="text"
+                            placeholder="Pair (e.g., BTC/USDT)"
+                            className="p-2 bg-gray-800 rounded"
+                            onChange={(e) => setFilter({ ...filter, pair: e.target.value })}
+                        />
+                        <input
+                            type="text"
+                            placeholder="Exchange"
+                            className="p-2 bg-gray-800 rounded"
+                            onChange={(e) => setFilter({ ...filter, exchange: e.target.value })}
+                        />
+                    </div>
+
+                    <h2 className="text-2xl font-semibold mb-2">CEX-CEX Opportunities</h2>
+                    <canvas ref={chartRef} className="mb-4"></canvas>
+                    <table className="w-full bg-gray-800 rounded">
+                        <thead>
+                            <tr className="bg-gray-700">
+                                <th className="p-2">Pair</th>
+                                <th className="p-2">Buy Exchange</th>
+                                <th className="p-2">Buy Price</th>
+                                <th className="p-2">Sell Exchange</th>
+                                <th className="p-2">Sell Price</th>
+                                <th className="p-2">Profit %</th>
+                                <th className="p-2">Volume USD</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {filteredCexCex.map((opp, index) => (
+                                <tr key={index} className="border-t border-gray-700">
+                                    <td className="p-2">{opp.pair}</td>
+                                    <td className="p-2">{opp.buy_exchange}</td>
+                                    <td className="p-2">{opp.buy_price}</td>
+                                    <td className="p-2">{opp.sell_exchange}</td>
+                                    <td className="p-2">{opp.sell_price}</td>
+                                    <td className="p-2 text-green-400">{opp.profit_percent}%</td>
+                                    <td className="p-2">{opp.volume_usd || 'N/A'}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+
+                    <h2 className="text-2xl font-semibold my-4">CEX-CEX-CEX Opportunities</h2>
+                    <table className="w-full bg-gray-800 rounded">
+                        <thead>
+                            <tr className="bg-gray-700">
+                                <th className="p-2">Cycle</th>
+                                <th className="p-2">Profit %</th>
+                                <th className="p-2">Volume USD</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {cexCexCexOpportunities.map((opp, index) => (
+                                <tr key={index} className="border-t border-gray-700">
+                                    <td className="p-2">{opp.cycle.map(c => `${c[2]} ${c[1]} on ${c[0]}`).join(' -> ')}</td>
+                                    <td className="p-2 text-green-400">{opp.profit_percent}%</td>
+                                    <td className="p-2">{opp.volume_usd || 'N/A'}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>

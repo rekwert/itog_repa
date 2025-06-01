@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+ccxtpro
+redis
+python-dotenv
+pydantic
+ccxt
+prometheus-client
+pytest
+pytest-asyncio

@@ -1,0 +1,14 @@
+{
+  "BTC/USDT": {
+    "withdraw": "0.00001 BTC",
+    "maker_order_rate": "0.1%",
+    "taker_buy_rate": "0.1%",
+    "taker_sell_rate": "0.18%"
+  },
+  "ETH/USDT": {
+    "withdraw": "0.00004 ETH",
+    "maker_order_rate": "0.1%",
+    "taker_buy_rate": "0.1%",
+    "taker_sell_rate": "0.18%"
+  }
+}
